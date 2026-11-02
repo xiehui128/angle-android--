@@ -137,7 +137,7 @@ jobs:
             thin_lto_enable_optimizations = true
             use_lld = true
             angle_enable_vulkan = true
-            angle_enable_gl = true
+            angle_enable_gl = false
             angle_enable_vulkan_validation_layers = false
             angle_enable_vulkan_api_dump_layer = false
             angle_assert_always_on = false
