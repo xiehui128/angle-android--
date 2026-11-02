@@ -14,7 +14,7 @@ on:
         type: boolean
 
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -33,7 +33,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 获取 angle/angle 仓库 main 分支的最新 commit hash
           LATEST_COMMIT=$(git ls-remote https://chromium.googlesource.com/angle/angle.git refs/heads/main | awk '{print $1}')
           tee -a "$GITHUB_OUTPUT" << EOF
           commit=$LATEST_COMMIT
@@ -43,7 +42,6 @@ jobs:
           if [[ "${{ github.event.inputs.force_build }}" == "true" ]]; then
             exit 0
           fi
-          # 获取上一次 nightly release 中记录的 commit hash
           PREV_COMMIT="$(gh release view nightly --repo "$GITHUB_REPOSITORY" --json body -q .body | sed -n 's/^Commit: \[\(.*\)\].*/\1/p')"
           tee -a "$GITHUB_OUTPUT" <<< "prev_commit=$PREV_COMMIT"
 
@@ -76,10 +74,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            git curl python3 python3-pip \
-            openjdk-17-jdk-headless \
-            ninja-build p7zip-full
+          sudo apt-get install -y git curl python3 python3-pip openjdk-17-jdk-headless ninja-build p7zip-full
 
       - name: Set JDK environment
         run: |
@@ -104,9 +99,7 @@ jobs:
       - name: Fetch depot_tools
         if: steps.cache-depot-tools.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 \
-            https://chromium.googlesource.com/chromium/tools/depot_tools.git \
-            "$DEPOT_TOOLS_PATH"
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_PATH"
 
       - name: Ensure depot_tools in PATH
         run: tee -a "$GITHUB_PATH" <<< "$DEPOT_TOOLS_PATH"
@@ -188,14 +181,7 @@ jobs:
           LATEST_COMMIT: ${{ needs.check-updates.outputs.commit }}
         run: |
           mkdir -p module/system/lib64
-          # 解压指定的 so 文件到 module/system/lib64/
-          7z e \
-            -omodule/system/lib64/ \
-            "AngleLibraries-${{ matrix.arch }}.apk" \
-            "lib/*/libEGL_angle.so" \
-            "lib/*/libGLESv1_CM_angle.so" \
-            "lib/*/libGLESv2_angle.so"
-          # 提取 ANGLE 版本号
+          7z e -omodule/system/lib64/ "AngleLibraries-${{ matrix.arch }}.apk" "lib/*/libEGL_angle.so" "lib/*/libGLESv1_CM_angle.so" "lib/*/libGLESv2_angle.so"
           MAJOR=$(grep "ANGLE_MAJOR_VERSION" "$ANGLE_ROOT/src/common/angle_version.h" | awk '{print $3}' | head -n 1)
           MINOR=$(grep "ANGLE_MINOR_VERSION" "$ANGLE_ROOT/src/common/angle_version.h" | awk '{print $3}' | head -n 1)
           ANGLE_VERSION="(ANGLE ${MAJOR:-0}.${MINOR:-0}.1 git hash: ${LATEST_COMMIT:0:12})"
@@ -254,3 +240,5 @@ jobs:
           tag_name: nightly
           name: Nightly Build
           body_path: assets/version.md
+          overwrite: true
+          make_latest: true
