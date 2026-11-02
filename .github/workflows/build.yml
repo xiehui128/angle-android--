@@ -1,18 +1,9 @@
 name: Build ANGLE
 on:
+  push:
+    branches: [ main ]
   schedule:
     - cron: '0 0 * * *'
-  workflow_dispatch:
-    inputs:
-      force_build:
-        description: 强制编译，忽略commit无变化检测
-        required: false
-        default: 'false'
-        type: boolean
-on:
-  push:
-    banches: [ main ]
-  schedule:
     - cron: '0 */4 * * *'
   workflow_dispatch:
     inputs:
@@ -24,7 +15,6 @@ on:
 
 permissions:
   contents: read
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -37,7 +27,6 @@ jobs:
       prev_commit: ${{ steps.check.outputs.prev_commit }}
       time: ${{ steps.check.outputs.time }}
       timestamp: ${{ steps.check.outputs.timestamp }}
-
     steps:
       - name: Check for new ANGLE commits
         id: check
@@ -51,11 +40,9 @@ jobs:
           time=$(TZ=Asia/Shanghai date "+%F %T")
           timestamp=$(date +%s)
           EOF
-
           if [[ "${{ github.event.inputs.force_build }}" == "true" ]]; then
             exit 0
           fi
-
           # 获取上一次 nightly release 中记录的 commit hash
           PREV_COMMIT="$(gh release view nightly --repo "$GITHUB_REPOSITORY" --json body -q .body | sed -n 's/^Commit: \[\(.*\)\].*/\1/p')"
           tee -a "$GITHUB_OUTPUT" <<< "prev_commit=$PREV_COMMIT"
@@ -64,21 +51,17 @@ jobs:
     needs: check-updates
     if: needs.check-updates.outputs.commit != needs.check-updates.outputs.prev_commit
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: arm64
           - arch: x64
-
     outputs:
       version: ${{ steps.package.outputs.version }}
-
     env:
       DEPOT_TOOLS_PATH: ${{ github.workspace }}/depot_tools
       ANGLE_ROOT: ${{ github.workspace }}/angle
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -96,7 +79,7 @@ jobs:
           sudo apt-get install -y \
             git curl python3 python3-pip \
             openjdk-17-jdk-headless \
-            ninja-build
+            ninja-build p7zip-full
 
       - name: Set JDK environment
         run: |
@@ -137,7 +120,6 @@ jobs:
         run: |
           mkdir -p "$ANGLE_ROOT"
           cd "$ANGLE_ROOT"
-
           tee .gclient << 'EOF'
           solutions = [
             {
@@ -151,7 +133,6 @@ jobs:
           ]
           target_os = ['android']
           EOF
-
           gclient sync --no-history
 
       - name: Generate GN build files
@@ -206,6 +187,7 @@ jobs:
         env:
           LATEST_COMMIT: ${{ needs.check-updates.outputs.commit }}
         run: |
+          mkdir -p module/system/lib64
           # 解压指定的 so 文件到 module/system/lib64/
           7z e \
             -omodule/system/lib64/ \
@@ -213,31 +195,26 @@ jobs:
             "lib/*/libEGL_angle.so" \
             "lib/*/libGLESv1_CM_angle.so" \
             "lib/*/libGLESv2_angle.so"
-
           # 提取 ANGLE 版本号
           MAJOR=$(grep "ANGLE_MAJOR_VERSION" "$ANGLE_ROOT/src/common/angle_version.h" | awk '{print $3}' | head -n 1)
           MINOR=$(grep "ANGLE_MINOR_VERSION" "$ANGLE_ROOT/src/common/angle_version.h" | awk '{print $3}' | head -n 1)
-
           ANGLE_VERSION="(ANGLE ${MAJOR:-0}.${MINOR:-0}.1 git hash: ${LATEST_COMMIT:0:12})"
           tee -a "$GITHUB_OUTPUT" <<< "version=${ANGLE_VERSION}"
-
           tee -a module/module.prop << EOF
           version=${{ needs.check-updates.outputs.time }} ${ANGLE_VERSION}
           versionCode=${{ needs.check-updates.outputs.timestamp }}
-          updateJson=https://github.com/TimeRainStarSky/angle-android-build/releases/download/nightly/update-${{ matrix.arch }}.json
+          updateJson=https://github.com/${{ github.repository }}/releases/download/nightly/update-${{ matrix.arch }}.json
           EOF
-
           tee "update-${{ matrix.arch }}.json" << EOF
           {
             "version": "${{ needs.check-updates.outputs.time }} ${ANGLE_VERSION}",
             "versionCode": ${{ needs.check-updates.outputs.timestamp }},
-            "zipUrl": "https://github.com/TimeRainStarSky/angle-android-build/releases/download/nightly/AngleLibraries-${{ matrix.arch }}.zip",
-            "changelog": "https://github.com/TimeRainStarSky/angle-android-build/releases/download/nightly/version.md"
+            "zipUrl": "https://github.com/${{ github.repository }}/releases/download/nightly/AngleLibraries-${{ matrix.arch }}.zip",
+            "changelog": "https://github.com/${{ github.repository }}/releases/download/nightly/version.md"
           }
           EOF
-
           cd module
-          7z -mm=xz -mx=9 a "../AngleLibraries-${{ matrix.arch }}.zip"
+          7z -mm=xz -mx=9 a "../AngleLibraries-${{ matrix.arch }}.zip" .
 
       - name: Upload Module Zip
         uses: actions/upload-artifact@v7
