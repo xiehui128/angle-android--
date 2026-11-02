@@ -1,3 +1,128 @@
+name: Build ANGLE
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * *'
+    - cron: '0 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even if no new commits'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-updates:
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.check.outputs.commit }}
+      prev_commit: ${{ steps.check.outputs.prev_commit }}
+      time: ${{ steps.check.outputs.time }}
+      timestamp: ${{ steps.check.outputs.timestamp }}
+    steps:
+      - name: Check for new ANGLE commits
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST_COMMIT=$(git ls-remote https://chromium.googlesource.com/angle/angle.git refs/heads/main | awk '{print $1}')
+          tee -a "$GITHUB_OUTPUT" << EOF
+          commit=$LATEST_COMMIT
+          time=$(TZ=Asia/Shanghai date "+%F %T")
+          timestamp=$(date +%s)
+          EOF
+          if [[ "${{ github.event.inputs.force_build }}" == "true" ]]; then
+            exit 0
+          fi
+          PREV_COMMIT="$(gh release view nightly --repo "$GITHUB_REPOSITORY" --json body -q .body | sed -n 's/^Commit: \[\(.*\)\].*/\1/p')"
+          tee -a "$GITHUB_OUTPUT" <<< "prev_commit=$PREV_COMMIT"
+
+  build-angle:
+    needs: check-updates
+    if: needs.check-updates.outputs.commit != needs.check-updates.outputs.prev_commit
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    env:
+      DEPOT_TOOLS_PATH: ${{ github.workspace }}/depot_tools
+      ANGLE_ROOT: ${{ github.workspace }}/angle
+      arch: arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          docker image prune -af
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git curl python3 python3-pip openjdk-17-jdk-headless ninja-build p7zip-full
+
+      - name: Set JDK environment
+        run: |
+          tee -a "$GITHUB_ENV" <<< "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64"
+          tee -a "$GITHUB_PATH" <<< "/usr/lib/jvm/java-17-openjdk-amd64/bin"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      - name: Cache depot_tools
+        id: cache-depot-tools
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.DEPOT_TOOLS_PATH }}
+          key: depot-tools-${{ runner.os }}-v1
+          restore-keys: |
+            depot-tools-${{ runner.os }}-
+
+      - name: Fetch depot_tools
+        if: steps.cache-depot-tools.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_PATH"
+
+      - name: Ensure depot_tools in PATH
+        run: tee -a "$GITHUB_PATH" <<< "$DEPOT_TOOLS_PATH"
+
+      - name: Configure git
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+
+      - name: Fetch ANGLE source
+        run: |
+          mkdir -p "$ANGLE_ROOT"
+          cd "$ANGLE_ROOT"
+          tee .gclient << 'EOF'
+          solutions = [
+            {
+              "name": ".",
+              "url": "https://chromium.googlesource.com/angle/angle.git@refs/heads/main",
+              "deps_file": "DEPS",
+              "managed": False,
+              "custom_deps": {},
+              "custom_vars": {},
+            },
+          ]
+          target_os = ['android']
+          EOF
+          gclient sync --no-history
+
       - name: Generate GN build files
         run: |
           cd "$ANGLE_ROOT"
@@ -30,3 +155,85 @@
             use_goma = false
             use_remoteexec = false
           '
+
+      - name: Build ANGLE APK
+        run: |
+          pushd "$ANGLE_ROOT"
+            autoninja -C out/Android angle_apks
+          popd
+          mv "$ANGLE_ROOT/out/Android/apks/AngleLibraries.apk" "AngleLibraries-${{ env.arch }}.apk"
+
+      - name: Upload ANGLE APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: angle-apk-${{ env.arch }}
+          path: AngleLibraries-${{ env.arch }}.apk
+          if-no-files-found: error
+
+      - name: Package Module
+        id: package
+        env:
+          LATEST_COMMIT: ${{ needs.check-updates.outputs.commit }}
+        run: |
+          mkdir -p module/system/lib64
+          7z e -omodule/system/lib64/ "AngleLibraries-${{ env.arch }}.apk" "lib/*/libEGL_angle.so" "lib/*/libGLESv1_CM_angle.so" "lib/*/libGLESv2_angle.so"
+          MAJOR=$(grep "ANGLE_MAJOR_VERSION" "$ANGLE_ROOT/src/common/angle_version.h" | awk '{print $3}' | head -n 1)
+          MINOR=$(grep "ANGLE_MINOR_VERSION" "$ANGLE_ROOT/src/common/angle_version.h" | awk '{print $3}' | head -n 1)
+          ANGLE_VERSION="(ANGLE ${MAJOR:-0}.${MINOR:-0}.1 git hash: ${LATEST_COMMIT:0:12})"
+          tee -a "$GITHUB_OUTPUT" <<< "version=${ANGLE_VERSION}"
+          tee -a module/module.prop << EOF
+          version=${{ needs.check-updates.outputs.time }} ${ANGLE_VERSION}
+          versionCode=${{ needs.check-updates.outputs.timestamp }}
+          updateJson=https://github.com/${{ github.repository }}/releases/download/nightly/update-${{ env.arch }}.json
+          EOF
+          tee "update-${{ env.arch }}.json" << EOF
+          {
+            "version": "${{ needs.check-updates.outputs.time }} ${ANGLE_VERSION}",
+            "versionCode": ${{ needs.check-updates.outputs.timestamp }},
+            "zipUrl": "https://github.com/${{ github.repository }}/releases/download/nightly/AngleLibraries-${{ env.arch }}.zip",
+            "changelog": "https://github.com/${{ github.repository }}/releases/download/nightly/version.md"
+          }
+          EOF
+          cd module
+          7z -mm=xz -mx=9 a "../AngleLibraries-${{ env.arch }}.zip" .
+
+      - name: Upload Module Zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: angle-module-${{ env.arch }}
+          path: |
+            AngleLibraries-${{ env.arch }}.zip
+            update-${{ env.arch }}.json
+          if-no-files-found: error
+
+  release:
+    needs:
+      - check-updates
+      - build-angle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: angle-*
+          path: assets
+          merge-multiple: true
+
+      - run: |
+          tee assets/version.md << 'EOF'
+          - **Commit:** [${{ needs.check-updates.outputs.commit }}](https://chromium.googlesource.com/angle/angle/+log/${{ needs.check-updates.outputs.commit }})
+          - **Version:** ${{ needs.check-updates.outputs.time }} ${{ needs.build-angle.outputs.version }}
+          - **Timestamp:** ${{ needs.check-updates.outputs.timestamp }}
+          EOF
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: assets/*
+          tag_name: nightly
+          name: Nightly Build
+          body_path: assets/version.md
+          overwrite: true
+          make_latest: true
