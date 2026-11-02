@@ -49,17 +49,12 @@ jobs:
     needs: check-updates
     if: needs.check-updates.outputs.commit != needs.check-updates.outputs.prev_commit
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-          - arch: x64
     outputs:
       version: ${{ steps.package.outputs.version }}
     env:
       DEPOT_TOOLS_PATH: ${{ github.workspace }}/depot_tools
       ANGLE_ROOT: ${{ github.workspace }}/angle
+      arch: arm64
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -133,7 +128,7 @@ jobs:
           cd "$ANGLE_ROOT"
           gn gen out/Android --args='
             target_os = "android"
-            target_cpu = "${{ matrix.arch }}"
+            target_cpu = "${{ env.arch }}"
             is_component_build = false
             is_debug = false
             arm_control_flow_integrity = "none"
@@ -166,13 +161,13 @@ jobs:
           pushd "$ANGLE_ROOT"
             autoninja -C out/Android angle_apks
           popd
-          mv "$ANGLE_ROOT/out/Android/apks/AngleLibraries.apk" "AngleLibraries-${{ matrix.arch }}.apk"
+          mv "$ANGLE_ROOT/out/Android/apks/AngleLibraries.apk" "AngleLibraries-${{ env.arch }}.apk"
 
       - name: Upload ANGLE APK
         uses: actions/upload-artifact@v7
         with:
-          name: angle-apk-${{ matrix.arch }}
-          path: AngleLibraries-${{ matrix.arch }}.apk
+          name: angle-apk-${{ env.arch }}
+          path: AngleLibraries-${{ env.arch }}.apk
           if-no-files-found: error
 
       - name: Package Module
@@ -181,7 +176,7 @@ jobs:
           LATEST_COMMIT: ${{ needs.check-updates.outputs.commit }}
         run: |
           mkdir -p module/system/lib64
-          7z e -omodule/system/lib64/ "AngleLibraries-${{ matrix.arch }}.apk" "lib/*/libEGL_angle.so" "lib/*/libGLESv1_CM_angle.so" "lib/*/libGLESv2_angle.so"
+          7z e -omodule/system/lib64/ "AngleLibraries-${{ env.arch }}.apk" "lib/*/libEGL_angle.so" "lib/*/libGLESv1_CM_angle.so" "lib/*/libGLESv2_angle.so"
           MAJOR=$(grep "ANGLE_MAJOR_VERSION" "$ANGLE_ROOT/src/common/angle_version.h" | awk '{print $3}' | head -n 1)
           MINOR=$(grep "ANGLE_MINOR_VERSION" "$ANGLE_ROOT/src/common/angle_version.h" | awk '{print $3}' | head -n 1)
           ANGLE_VERSION="(ANGLE ${MAJOR:-0}.${MINOR:-0}.1 git hash: ${LATEST_COMMIT:0:12})"
@@ -189,26 +184,26 @@ jobs:
           tee -a module/module.prop << EOF
           version=${{ needs.check-updates.outputs.time }} ${ANGLE_VERSION}
           versionCode=${{ needs.check-updates.outputs.timestamp }}
-          updateJson=https://github.com/${{ github.repository }}/releases/download/nightly/update-${{ matrix.arch }}.json
+          updateJson=https://github.com/${{ github.repository }}/releases/download/nightly/update-${{ env.arch }}.json
           EOF
-          tee "update-${{ matrix.arch }}.json" << EOF
+          tee "update-${{ env.arch }}.json" << EOF
           {
             "version": "${{ needs.check-updates.outputs.time }} ${ANGLE_VERSION}",
             "versionCode": ${{ needs.check-updates.outputs.timestamp }},
-            "zipUrl": "https://github.com/${{ github.repository }}/releases/download/nightly/AngleLibraries-${{ matrix.arch }}.zip",
+            "zipUrl": "https://github.com/${{ github.repository }}/releases/download/nightly/AngleLibraries-${{ env.arch }}.zip",
             "changelog": "https://github.com/${{ github.repository }}/releases/download/nightly/version.md"
           }
           EOF
           cd module
-          7z -mm=xz -mx=9 a "../AngleLibraries-${{ matrix.arch }}.zip" .
+          7z -mm=xz -mx=9 a "../AngleLibraries-${{ env.arch }}.zip" .
 
       - name: Upload Module Zip
         uses: actions/upload-artifact@v7
         with:
-          name: angle-module-${{ matrix.arch }}
+          name: angle-module-${{ env.arch }}
           path: |
-            AngleLibraries-${{ matrix.arch }}.zip
-            update-${{ matrix.arch }}.json
+            AngleLibraries-${{ env.arch }}.zip
+            update-${{ env.arch }}.json
           if-no-files-found: error
 
   release:
