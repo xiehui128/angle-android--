@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -33,21 +34,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -eo pipefail
           LATEST_COMMIT=$(git ls-remote https://chromium.googlesource.com/angle/angle.git refs/heads/main | awk '{print $1}')
           tee -a "$GITHUB_OUTPUT" << EOF
           commit=$LATEST_COMMIT
           time=$(TZ=Asia/Shanghai date "+%F %T")
           timestamp=$(date +%s)
           EOF
-          if [[ "${{ github.event.inputs.force_build }}" == "true" ]]; then
-            exit 0
+
+          PREV_COMMIT=""
+          if [[ "${{ github.event.inputs.force_build }}" != "true" ]]; then
+            # 容错：nightly release不存在不直接崩溃
+            PREV_COMMIT=$(gh release view nightly --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null | sed -n 's/^Commit: \[\(.*\)\].*/\1/p' || true)
           fi
-          PREV_COMMIT="$(gh release view nightly --repo "$GITHUB_REPOSITORY" --json body -q .body | sed -n 's/^Commit: \[\(.*\)\].*/\1/p')"
           tee -a "$GITHUB_OUTPUT" <<< "prev_commit=$PREV_COMMIT"
+          echo "LATEST_COMMIT=$LATEST_COMMIT"
+          echo "PREV_COMMIT=$PREV_COMMIT"
 
   build-angle:
     needs: check-updates
-    if: needs.check-updates.outputs.commit != needs.check-updates.outputs.prev_commit
+    # force_build=true直接构建；否则仅当commit变化才构建
+    if: |
+      github.event.inputs.force_build == 'true' ||
+      needs.check-updates.outputs.commit != needs.check-updates.outputs.prev_commit
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.package.outputs.version }}
@@ -59,12 +68,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Free disk space
+      - name: Free disk space (aggressive)
         run: |
+          set -e
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          docker image prune -af
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /var/lib/docker
+          docker image prune -af || true
+          df -h
 
       - name: Install system dependencies
         run: |
@@ -87,7 +99,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ env.DEPOT_TOOLS_PATH }}
-          key: depot-tools-${{ runner.os }}-v1
+          # cache key带日期，防止depot_tools永久过期
+          key: depot-tools-${{ runner.os }}-${{ github.run_date }}
           restore-keys: |
             depot-tools-${{ runner.os }}-
 
@@ -103,9 +116,12 @@ jobs:
         run: |
           git config --global user.email "ci@example.com"
           git config --global user.name "CI"
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 120
 
       - name: Fetch ANGLE source
         run: |
+          set -eo pipefail
           mkdir -p "$ANGLE_ROOT"
           cd "$ANGLE_ROOT"
           tee .gclient << 'EOF'
@@ -121,7 +137,8 @@ jobs:
           ]
           target_os = ['android']
           EOF
-          gclient sync --no-history
+          # gclient 网络重试
+          gclient sync --no-history -vvv || gclient sync --no-history -vvv
 
       - name: Generate GN build files
         run: |
@@ -133,8 +150,8 @@ jobs:
             is_debug = false
             arm_control_flow_integrity = "none"
             use_rtti = false
-            use_thin_lto = true
-            thin_lto_enable_optimizations = true
+            use_thin_lto = false
+            thin_lto_enable_optimizations = false
             use_lld = true
             angle_enable_vulkan = true
             angle_enable_gl = false
@@ -155,13 +172,17 @@ jobs:
             use_goma = false
             use_remoteexec = false
           '
+          gn check out/Android
 
       - name: Build ANGLE APK
         run: |
+          set -eo pipefail
           pushd "$ANGLE_ROOT"
             autoninja -C out/Android angle_apks
           popd
+          ls -lh "$ANGLE_ROOT/out/Android/apks/"
           mv "$ANGLE_ROOT/out/Android/apks/AngleLibraries.apk" "AngleLibraries-${{ env.arch }}.apk"
+          ls -lh ./*.apk
 
       - name: Upload ANGLE APK
         uses: actions/upload-artifact@v7
@@ -175,17 +196,29 @@ jobs:
         env:
           LATEST_COMMIT: ${{ needs.check-updates.outputs.commit }}
         run: |
+          set -eo pipefail
           mkdir -p module/system/lib64
-          7z e -omodule/system/lib64/ "AngleLibraries-${{ env.arch }}.apk" "lib/*/libEGL_angle.so" "lib/*/libGLESv1_CM_angle.so" "lib/*/libGLESv2_angle.so"
+          APK_FILE="AngleLibraries-${{ env.arch }}.apk"
+          # 打印apk内部结构用于调试
+          7z l "$APK_FILE"
+          # 硬编码arm64‑v8a路径，抛弃通配符
+          7z e -omodule/system/lib64/ "$APK_FILE" \
+            lib/arm64-v8a/libEGL_angle.so \
+            lib/arm64-v8a/libGLESv1_CM_angle.so \
+            lib/arm64-v8a/libGLESv2_angle.so
+          ls -lh module/system/lib64/
+
           MAJOR=$(grep "ANGLE_MAJOR_VERSION" "$ANGLE_ROOT/src/common/angle_version.h" | awk '{print $3}' | head -n 1)
           MINOR=$(grep "ANGLE_MINOR_VERSION" "$ANGLE_ROOT/src/common/angle_version.h" | awk '{print $3}' | head -n 1)
           ANGLE_VERSION="(ANGLE ${MAJOR:-0}.${MINOR:-0}.1 git hash: ${LATEST_COMMIT:0:12})"
           tee -a "$GITHUB_OUTPUT" <<< "version=${ANGLE_VERSION}"
+
           tee -a module/module.prop << EOF
           version=${{ needs.check-updates.outputs.time }} ${ANGLE_VERSION}
           versionCode=${{ needs.check-updates.outputs.timestamp }}
           updateJson=https://github.com/${{ github.repository }}/releases/download/nightly/update-${{ env.arch }}.json
           EOF
+
           tee "update-${{ env.arch }}.json" << EOF
           {
             "version": "${{ needs.check-updates.outputs.time }} ${ANGLE_VERSION}",
@@ -194,6 +227,7 @@ jobs:
             "changelog": "https://github.com/${{ github.repository }}/releases/download/nightly/version.md"
           }
           EOF
+
           cd module
           7z -mm=xz -mx=9 a "../AngleLibraries-${{ env.arch }}.zip" .
 
@@ -221,12 +255,14 @@ jobs:
           path: assets
           merge-multiple: true
 
-      - run: |
-          tee assets/version.md << 'EOF'
+      - name: Generate version.md
+        run: |
+          tee assets/version.md << EOF
           - **Commit:** [${{ needs.check-updates.outputs.commit }}](https://chromium.googlesource.com/angle/angle/+log/${{ needs.check-updates.outputs.commit }})
           - **Version:** ${{ needs.check-updates.outputs.time }} ${{ needs.build-angle.outputs.version }}
           - **Timestamp:** ${{ needs.check-updates.outputs.timestamp }}
           EOF
+          cat assets/version.md
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v3
@@ -235,5 +271,6 @@ jobs:
           tag_name: nightly
           name: Nightly Build
           body_path: assets/version.md
-          overwrite: true
+          overwrite_files: true
           make_latest: true
+          draft: false
