@@ -35,6 +35,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eo pipefail
+          git config --global url."https://github.com/google/".insteadOf "https://chromium.googlesource.com/"
           LATEST_COMMIT=$(git ls-remote https://chromium.googlesource.com/angle/angle.git refs/heads/main | awk '{print $1}')
           tee -a "$GITHUB_OUTPUT" << EOF
           commit=$LATEST_COMMIT
@@ -123,6 +124,7 @@ jobs:
           git config --global user.name "CI"
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 120
+          git config --global url."https://github.com/google/".insteadOf "https://chromium.googlesource.com/"
 
       - name: Fetch ANGLE source
         run: |
@@ -142,8 +144,18 @@ jobs:
           ]
           target_os = ['android']
           EOF
-          # gclient 网络重试
-          gclient sync --no-history -vvv || gclient sync --no-history -vvv
+          # 降低并发，防止大量git请求触发429限流，双重重试
+          gclient sync --no-history --jobs=2 -vvv || gclient sync --no-history --jobs=2 -vvv
+
+      # ########### cherry‑pick补丁位置，取消注释填入你的commit hash
+      # - name: Cherry‑pick Vulkan stability patches
+      #   run: |
+      #     set -eo pipefail
+      #     cd "$ANGLE_ROOT"
+      #     git fetch origin
+      #     git cherry-pick HASH1
+      #     git cherry-pick HASH2
+      #     git cherry-pick HASH3
 
       - name: Generate GN build files
         run: |
