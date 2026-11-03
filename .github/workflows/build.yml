@@ -41,7 +41,6 @@ jobs:
           time=$(TZ=Asia/Shanghai date "+%F %T")
           timestamp=$(date +%s)
           EOF
-
           PREV_COMMIT=""
           if [[ "${{ github.event.inputs.force_build }}" != "true" ]]; then
             # 容错：nightly release不存在不直接崩溃
@@ -99,7 +98,6 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ env.DEPOT_TOOLS_PATH }}
-          # cache key带日期，防止depot_tools永久过期
           key: depot-tools-${{ runner.os }}-${{ github.run_date }}
           restore-keys: |
             depot-tools-${{ runner.os }}-
@@ -107,7 +105,14 @@ jobs:
       - name: Fetch depot_tools
         if: steps.cache-depot-tools.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS_PATH"
+          set -eo pipefail
+          if [ -d "$DEPOT_TOOLS_PATH" ]; then
+            echo "Clean old depot_tools dir"
+            rm -rf "$DEPOT_TOOLS_PATH"
+          fi
+          # 使用github镜像，双重重试，规避googlesource网络问题
+          git clone --depth 1 https://github.com/chromium/depot_tools.git "$DEPOT_TOOLS_PATH" || \
+          git clone --depth 1 https://github.com/chromium/depot_tools.git "$DEPOT_TOOLS_PATH"
 
       - name: Ensure depot_tools in PATH
         run: tee -a "$GITHUB_PATH" <<< "$DEPOT_TOOLS_PATH"
