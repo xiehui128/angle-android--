@@ -23,6 +23,7 @@ concurrency:
 jobs:
   check-updates:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     outputs:
       commit: ${{ steps.check.outputs.commit }}
       prev_commit: ${{ steps.check.outputs.prev_commit }}
@@ -35,7 +36,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eo pipefail
-          git config --global url."https://github.com/google/".insteadOf "https://chromium.googlesource.com/"
+          git config --global http.version HTTP/1.1
+          git config --global http.postBuffer 524288000
           LATEST_COMMIT=$(git ls-remote https://chromium.googlesource.com/angle/angle.git refs/heads/main | awk '{print $1}')
           tee -a "$GITHUB_OUTPUT" << EOF
           commit=$LATEST_COMMIT
@@ -44,7 +46,6 @@ jobs:
           EOF
           PREV_COMMIT=""
           if [[ "${{ github.event.inputs.force_build }}" != "true" ]]; then
-            # 容错：nightly release不存在不直接崩溃
             PREV_COMMIT=$(gh release view nightly --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null | sed -n 's/^Commit: \[\(.*\)\].*/\1/p' || true)
           fi
           tee -a "$GITHUB_OUTPUT" <<< "prev_commit=$PREV_COMMIT"
@@ -53,7 +54,7 @@ jobs:
 
   build-angle:
     needs: check-updates
-    # force_build=true直接构建；否则仅当commit变化才构建
+    timeout-minutes: 120
     if: |
       github.event.inputs.force_build == 'true' ||
       needs.check-updates.outputs.commit != needs.check-updates.outputs.prev_commit
@@ -68,7 +69,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Free disk space (aggressive)
+      - name: Free disk space
         run: |
           set -e
           sudo rm -rf /usr/share/dotnet
@@ -99,7 +100,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ env.DEPOT_TOOLS_PATH }}
-          key: depot-tools-${{ runner.os }}-${{ github.run_date }}
+          key: depot-tools-${{ runner.os }}-v2
           restore-keys: |
             depot-tools-${{ runner.os }}-
 
@@ -108,10 +109,8 @@ jobs:
         run: |
           set -eo pipefail
           if [ -d "$DEPOT_TOOLS_PATH" ]; then
-            echo "Clean old depot_tools dir"
             rm -rf "$DEPOT_TOOLS_PATH"
           fi
-          # 使用github镜像，双重重试，规避googlesource网络问题
           git clone --depth 1 https://github.com/chromium/depot_tools.git "$DEPOT_TOOLS_PATH" || \
           git clone --depth 1 https://github.com/chromium/depot_tools.git "$DEPOT_TOOLS_PATH"
 
@@ -123,8 +122,9 @@ jobs:
           git config --global user.email "ci@example.com"
           git config --global user.name "CI"
           git config --global http.lowSpeedLimit 1000
-          git config --global http.lowSpeedTime 120
-          git config --global url."https://github.com/google/".insteadOf "https://chromium.googlesource.com/"
+          git config --global http.lowSpeedTime 180
+          git config --global http.version HTTP/1.1
+          git config --global http.postBuffer 524288000
 
       - name: Fetch ANGLE source
         run: |
@@ -144,18 +144,16 @@ jobs:
           ]
           target_os = ['android']
           EOF
-          # 降低并发，防止大量git请求触发429限流，双重重试
-          gclient sync --no-history --jobs=2 -vvv || gclient sync --no-history --jobs=2 -vvv
+          gclient sync --no-history -j1 -vvv || \
+          gclient sync --no-history -j1 -vvv || \
+          gclient sync --no-history -j1 -vvv
 
-      # ########### cherry‑pick补丁位置，取消注释填入你的commit hash
-      # - name: Cherry‑pick Vulkan stability patches
+      # - name: Cherry‑pick Vulkan patches
       #   run: |
       #     set -eo pipefail
       #     cd "$ANGLE_ROOT"
       #     git fetch origin
-      #     git cherry-pick HASH1
-      #     git cherry-pick HASH2
-      #     git cherry-pick HASH3
+      #     git cherry-pick 你的commit1 你的commit2 你的commit3
 
       - name: Generate GN build files
         run: |
@@ -171,7 +169,7 @@ jobs:
             thin_lto_enable_optimizations = false
             use_lld = true
             angle_enable_vulkan = true
-            angle_enable_gl = false
+            angle_enable_gl = true
             angle_enable_vulkan_validation_layers = false
             angle_enable_vulkan_api_dump_layer = false
             angle_assert_always_on = false
@@ -216,9 +214,7 @@ jobs:
           set -eo pipefail
           mkdir -p module/system/lib64
           APK_FILE="AngleLibraries-${{ env.arch }}.apk"
-          # 打印apk内部结构用于调试
           7z l "$APK_FILE"
-          # 硬编码arm64‑v8a路径，抛弃通配符
           7z e -omodule/system/lib64/ "$APK_FILE" \
             lib/arm64-v8a/libEGL_angle.so \
             lib/arm64-v8a/libGLESv1_CM_angle.so \
@@ -262,6 +258,7 @@ jobs:
       - check-updates
       - build-angle
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
