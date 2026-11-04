@@ -134,9 +134,7 @@ jobs:
               "url": "https://chromium.googlesource.com/angle/angle.git@refs/heads/main",
               "deps_file": "DEPS",
               "managed": False,
-              "custom_deps": {
-                "third_party/clang-format/script": None,
-              },
+              "custom_deps": {},
               "custom_vars": {},
             },
           ]
